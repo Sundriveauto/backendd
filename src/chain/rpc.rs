@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use super::errors::{map_contract_error, ApiErrorCode};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LedgerEntryInfo {
     pub key: String,
@@ -359,18 +361,48 @@ impl RpcClient {
 /// Decode a Soroban simulation error string into a contract error code and a
 /// human-readable message. Soroban encodes contract failures as
 /// `Error(Contract, #<code>)`; anything else is passed through verbatim.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContractError {
+    pub code: Option<u32>,
+    pub api_code: ApiErrorCode,
+    pub http_status: u16,
+    pub message: String,
+    pub remediation: String,
+}
+
 fn decode_contract_error(raw: &str) -> ContractError {
     let code = raw
-        .split("#")
-        .nth(1)
-        .and_then(|s| s.trim_end_matches(')').trim().parse::<u32>().ok());
+        .contains("Error(Contract,")
+        .then(|| {
+            raw.split('#')
+                .nth(1)
+                .and_then(|s| s.trim_end_matches(')').trim().parse::<u32>().ok())
+        })
+        .flatten();
 
-    let message = match code {
-        Some(code) => format!("contract error #{code}: {raw}"),
-        None => raw.to_string(),
+    let decoded = code.map(map_contract_error);
+    let (api_code, http_status, message, remediation) = match decoded {
+        Some(decoded) => (
+            decoded.code,
+            decoded.http_status,
+            format!("{}: {raw}", decoded.message),
+            decoded.remediation,
+        ),
+        None => (
+            ApiErrorCode::Unknown,
+            500,
+            raw.to_string(),
+            "Inspect the raw Soroban error and consult the contract and host error catalogue."
+                .to_string(),
+        ),
     };
-
-    ContractError { code, message }
+    ContractError {
+        code,
+        api_code,
+        http_status,
+        message,
+        remediation,
+    }
 }
 
 #[cfg(test)]
@@ -390,7 +422,15 @@ mod tests {
     fn decodes_contract_error_code() {
         let err = decode_contract_error("HostError: Error(Contract, #12)");
         assert_eq!(err.code, Some(12));
-        assert!(err.message.contains("contract error #12"));
+        assert_eq!(err.api_code, ApiErrorCode::Unknown);
+        assert!(err.message.contains("#12"));
+    }
+
+    #[test]
+    fn exposes_catalogue_code_for_known_contract_errors() {
+        let err = decode_contract_error("HostError: Error(Contract, #1)");
+        assert_eq!(err.api_code, ApiErrorCode::InsufficientCollateral);
+        assert_eq!(err.http_status, 422);
     }
 
     #[test]
@@ -398,6 +438,6 @@ mod tests {
         let err = decode_contract_error("HostError: Error(WasmVm, MissingValue)");
         assert_eq!(err.code, None);
         assert_eq!(err.message, "HostError: Error(WasmVm, MissingValue)");
+        assert_eq!(err.api_code, ApiErrorCode::Unknown);
     }
 }
-
