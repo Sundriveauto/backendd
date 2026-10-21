@@ -27,6 +27,7 @@ pub mod price_sources;
 pub mod rate_limit_key;
 pub mod request_id;
 pub mod secrets;
+pub mod session_keys;
 pub mod signing;
 pub mod strategies;
 pub mod strkey;
@@ -625,6 +626,18 @@ fn mutation_rate_limited_routes() -> Router<AppState> {
             "/api/v1/strategies/:id/close",
             post(strategies::close_strategy),
         )
+        .route(
+            "/api/v1/session-keys/challenges",
+            post(session_keys::create_challenge),
+        )
+        .route(
+            "/api/v1/session-keys",
+            post(session_keys::confirm).get(session_keys::list),
+        )
+        .route(
+            "/api/v1/session-keys/:id",
+            axum::routing::delete(session_keys::revoke),
+        )
         .layer(GovernorLayer { config })
 }
 
@@ -635,7 +648,7 @@ fn request_id_header() -> axum::http::HeaderName {
 pub fn build_router(state: AppState) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
-        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
         .allow_headers(Any);
 
     Router::new()

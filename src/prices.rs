@@ -1,5 +1,9 @@
 use std::time::Duration;
 
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::State;
+use axum::response::IntoResponse;
+
 use crate::price_sources::PriceSource;
 
 const SYMBOLS: &[&str] = &["XLM", "BTC", "ETH", "SOL"];
@@ -44,5 +48,37 @@ pub async fn price_ingestion_loop(state: crate::AppState) {
             }
         }
         tokio::time::sleep(Duration::from_secs(15)).await;
+    }
+}
+
+pub async fn ws_spot(
+    State(state): State<crate::AppState>,
+    websocket: WebSocketUpgrade,
+) -> impl IntoResponse {
+    websocket.on_upgrade(move |socket| stream_prices(socket, state))
+}
+
+async fn stream_prices(mut socket: WebSocket, state: crate::AppState) {
+    let mut updates = state.spot_tx.subscribe();
+    loop {
+        tokio::select! {
+            message = socket.recv() => {
+                match message {
+                    Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                    Some(Ok(_)) => {}
+                }
+            }
+            update = updates.recv() => {
+                match update {
+                    Ok(payload) => {
+                        if socket.send(Message::Text(payload.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        }
     }
 }
